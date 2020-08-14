@@ -35,6 +35,9 @@ module globalData
   ! time data structure
   use dataTypes,  only : time         ! time data
 
+  ! time data structure
+  use dataTypes,  only : nc           ! netCDF data
+
   ! data size
   USE var_lookup, only : nStructures   ! number of variables for data structure
   USE var_lookup, only : nDimensions   ! number of variables for data structure
@@ -99,7 +102,7 @@ module globalData
   integer(i4b)                   , public :: nRch                 ! number of reaches in the whole river network
 
   ! basin and reach IDs (to be removed)
-  integer(i4b)    , allocatable  , public :: basinID(:)           ! HRU id
+  integer(i8b)    , allocatable  , public :: basinID(:)           ! HRU id
   integer(i4b)    , allocatable  , public :: reachID(:)           ! reach id
 
   ! DataTime data/variables
@@ -108,11 +111,16 @@ module globalData
   real(dp)                       , public :: endJulday            ! julian day: end of routing simulation
   real(dp)                       , public :: refJulday            ! julian day: reference
   real(dp)                       , public :: modJulday            ! julian day: simulation time step
-  real(dp)                       , public :: restartJulday        ! julian day: restart drop off
   real(dp)        , allocatable  , public :: roJulday(:)          ! julian day: runoff input time
   real(dp)        , allocatable  , public :: timeVar(:)           ! time variables (unit given by time variable)
   real(dp)                       , public :: TSEC(0:1)            ! begning and end of time step (sec)
   type(time)                     , public :: modTime(0:1)         ! previous and current model time (yyyy:mm:dd:hh:mm:ss)
+  type(time)                     , public :: restCal              ! desired restart date/time (yyyy:mm:dd:hh:mm:ss)
+  type(time)                     , public :: dropCal              ! restart dropoff date/time (yyyy:mm:dd:hh:mm:ss)
+  logical(lgt)                   , public :: restartAlarm         ! alarm to triger restart file writing
+
+  ! simulation output netcdf
+  type(nc)                       , public :: simout_nc
 
   ! river topology and parameter structures
   type(RCHPRP)    , allocatable  , public :: RPARAM(:)            ! Reach Parameters for whole domain

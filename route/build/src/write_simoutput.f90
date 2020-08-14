@@ -12,6 +12,7 @@ USE public_var,only: kinematicWave          ! kinematic wave
 USE public_var,only: impulseResponseFunc    ! impulse response function
 USE public_var,only: allRoutingMethods      ! all routing methods
 USE globalData,only: meta_rflx
+USE globalData,only: simout_nc
 USE io_netcdf, only: ncd_int
 USE io_netcdf, only: ncd_float, ncd_double
 USE io_netcdf, only: ncd_unlimited
@@ -20,13 +21,13 @@ USE io_netcdf, only: def_var                ! define netcdf variable
 USE io_netcdf, only: def_dim                ! define netcdf dimension
 USE io_netcdf, only: put_global_attr        ! write global attributes
 USE io_netcdf, only: end_def                ! end defining netcdf
+USE io_netcdf, only: open_nc                ! open netcdf
 USE io_netcdf, only: close_nc               ! close netcdf
 USE io_netcdf, only: write_nc               ! write a variable to the NetCDF file
 
 implicit none
 
 ! The following variables used only in this module
-character(len=strLen),save        :: fileout          ! name of the output file
 integer(i4b),         save        :: jTime            ! time step in output netCDF
 
 private
@@ -61,42 +62,42 @@ CONTAINS
   iens = 1
 
   ! write time -- note time is just carried across from the input
-  call write_nc(trim(fileout), 'time', (/runoff_data%time/), (/jTime/), (/1/), ierr, cmessage)
+  call write_nc(simout_nc%ncid, 'time', (/runoff_data%time/), (/jTime/), (/1/), ierr, cmessage)
   if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 
   if (meta_rflx(ixRFLX%basRunoff)%varFile) then
    ! write the basin runoff at HRU (m/s)
-   call write_nc(trim(fileout), 'basRunoff', runoff_data%basinRunoff, (/1,jTime/), (/nHRU,1/), ierr, cmessage)
+   call write_nc(simout_nc%ncid, 'basRunoff', runoff_data%basinRunoff, (/1,jTime/), (/nHRU,1/), ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
   endif
 
   if (meta_rflx(ixRFLX%instRunoff)%varFile) then
    ! write instataneous local runoff in each stream segment (m3/s)
-   call write_nc(trim(fileout), 'instRunoff', RCHFLX(iens,:)%BASIN_QI, (/1,jTime/), (/nRch,1/), ierr, cmessage)
+   call write_nc(simout_nc%ncid, 'instRunoff', RCHFLX(iens,:)%BASIN_QI, (/1,jTime/), (/nRch,1/), ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
   endif
 
   if (meta_rflx(ixRFLX%dlayRunoff)%varFile) then
    ! write routed local runoff in each stream segment (m3/s)
-   call write_nc(trim(fileout), 'dlayRunoff', RCHFLX(iens,:)%BASIN_QR(1), (/1,jTime/), (/nRch,1/), ierr, cmessage)
+   call write_nc(simout_nc%ncid, 'dlayRunoff', RCHFLX(iens,:)%BASIN_QR(1), (/1,jTime/), (/nRch,1/), ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
   endif
 
   if (meta_rflx(ixRFLX%sumUpstreamRunoff)%varFile) then
    ! write accumulated runoff (m3/s)
-   call write_nc(trim(fileout), 'sumUpstreamRunoff', RCHFLX(iens,:)%UPSTREAM_QI, (/1,jTime/), (/nRch,1/), ierr, cmessage)
+   call write_nc(simout_nc%ncid, 'sumUpstreamRunoff', RCHFLX(iens,:)%UPSTREAM_QI, (/1,jTime/), (/nRch,1/), ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
   endif
 
   if (meta_rflx(ixRFLX%KWTroutedRunoff)%varFile) then
    ! write routed runoff (m3/s)
-   call write_nc(trim(fileout), 'KWTroutedRunoff', RCHFLX(iens,:)%REACH_Q, (/1,jTime/), (/nRch,1/), ierr, cmessage)
+   call write_nc(simout_nc%ncid, 'KWTroutedRunoff', RCHFLX(iens,:)%REACH_Q, (/1,jTime/), (/nRch,1/), ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
   endif
 
   if (meta_rflx(ixRFLX%IRFroutedRunoff)%varFile) then
    ! write routed runoff (m3/s)
-   call write_nc(trim(fileout), 'IRFroutedRunoff', RCHFLX(iens,:)%REACH_Q_IRF, (/1,jTime/), (/nRch,1/), ierr, cmessage)
+   call write_nc(simout_nc%ncid, 'IRFroutedRunoff', RCHFLX(iens,:)%REACH_Q_IRF, (/1,jTime/), (/nRch,1/), ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
   endif
 
@@ -120,8 +121,7 @@ CONTAINS
  USE globalData,          only : modTime           ! previous and current model time
  USE globalData,          only : nEns, nHRU, nRch  ! number of ensembles, HRUs and river reaches
  ! subroutines
- USE time_utils_module,   only : compCalday        ! compute calendar day
- USE time_utils_module,   only : compCalday_noleap ! compute calendar day
+ USE process_time_module, ONLY : conv_julian2cal   ! compute data and time from julian day
 
  implicit none
 
@@ -135,48 +135,44 @@ CONTAINS
  logical(lgt)                    :: defnewoutputfile ! flag to define new output file
  character(len=50),parameter     :: fmtYMDS='(a,I0.4,a,I0.2,a,I0.2,a,I0.5,a)'
 
- ! initialize error control
  ierr=0; message='prep_output/'
 
-  ! get the time
-  select case(trim(calendar))
-   case('noleap')
-    call compCalday_noleap(modJulday,modTime(1)%iy,modTime(1)%im,modTime(1)%id,modTime(1)%ih,modTime(1)%imin,modTime(1)%dsec,ierr,cmessage)
-   case ('standard','gregorian','proleptic_gregorian')
-    call compCalday(modJulday,modTime(1)%iy,modTime(1)%im,modTime(1)%id,modTime(1)%ih,modTime(1)%imin,modTime(1)%dsec,ierr,cmessage)
-   case default;    ierr=20; message=trim(message)//'calendar name: '//trim(calendar)//' invalid'; return
-  end select
-  if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
+ ! get calendar date/time at current model time step from julian date
+ call conv_julian2cal(modJulday, calendar, modTime(1), ierr, cmessage)
+ if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 
-  ! print progress
-  write(iulog,'(a,I4,4(x,I4))') new_line('a'), modTime(1)%iy, modTime(1)%im, modTime(1)%id, modTime(1)%ih, modTime(1)%imin
+ ! print progress
+ write(iulog,'(a,I4,4(x,I4))') new_line('a'), modTime(1)%iy, modTime(1)%im, modTime(1)%id, modTime(1)%ih, modTime(1)%imin
 
-  ! *****
-  ! *** Define model output file...
-  ! *******************************
-
-  ! check need for the new file
-  select case(trim(newFileFrequency))
+ ! check need for the new file
+ select case(trim(newFileFrequency))
    case('single'); defNewOutputFile=(modTime(0)%iy==integerMissing)
    case('annual'); defNewOutputFile=(modTime(1)%iy/=modTime(0)%iy)
    case('month');  defNewOutputFile=(modTime(1)%im/=modTime(0)%im)
    case('day');    defNewOutputFile=(modTime(1)%id/=modTime(0)%id)
    case default; ierr=20; message=trim(message)//'unable to identify the option to define new output files'; return
-  end select
+ end select
 
-  ! define new file
-  if(defNewOutputFile)then
+ ! define new file
+ if(defNewOutputFile)then
+
+   if (simout_nc%status == 2) then
+     call close_nc(simout_nc%ncid, ierr, cmessage)
+     if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
+     simout_nc%ncname = 'empty'
+     simout_nc%ncid   = integerMissing
+     simout_nc%status = integerMissing
+   endif
 
    ! initialize time
    jTime=1
 
    ! update filename
-
    sec_in_day = modTime(1)%ih*60*60+modTime(1)%imin*60+nint(modTime(1)%dsec)
-   write(fileout, fmtYMDS) trim(output_dir)//trim(case_name)//'.mizuRoute.h.', &
-                           modTime(1)%iy, '-', modTime(1)%im, '-', modTime(1)%id, '-',sec_in_day,'.nc'
-   ! define output file
-   call defineFile(trim(fileout),                         &  ! input: file name
+   write(simout_nc%ncname, fmtYMDS) trim(output_dir)//trim(case_name)//'.h.', &
+                                     modTime(1)%iy, '-', modTime(1)%im, '-', modTime(1)%id, '-',sec_in_day,'.nc'
+
+   call defineFile(simout_nc%ncname,                      &  ! input: file name
                    nEns,                                  &  ! input: number of ensembles
                    nHRU,                                  &  ! input: number of HRUs
                    nRch,                                  &  ! input: number of stream segments
@@ -185,22 +181,25 @@ CONTAINS
                    ierr,cmessage)                            ! output: error control
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 
-   ! define basin ID
-   call write_nc(trim(fileout), 'basinID', basinID, (/1/), (/nHRU/), ierr, cmessage)
+   call open_nc(simout_nc%ncname, 'w', simout_nc%ncid, ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 
-   ! define reach ID
-   call write_nc(trim(fileout), 'reachID', reachID, (/1/), (/nRch/), ierr, cmessage)
+   simout_nc%status = 2
+
+   call write_nc(simout_nc%ncid, 'basinID', int(basinID,kind(i4b)), (/1/), (/nHRU/), ierr, cmessage)
+   if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
+
+   call write_nc(simout_nc%ncid, 'reachID', reachID, (/1/), (/nRch/), ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 
   ! no new file requested: increment time
-  else
+ else
 
    jTime = jTime+1
 
-  endif
+ endif
 
-  modTime(0) = modTime(1)
+ modTime(0) = modTime(1)
 
  END SUBROUTINE prep_output
 
@@ -310,15 +309,12 @@ CONTAINS
 
  end do
 
- ! put global attribute
  call put_global_attr(ncid, 'version', trim(mizuRouteVersion) ,ierr, cmessage)
  if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 
- ! end definitions
  call end_def(ncid, ierr, cmessage)
  if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 
- ! close NetCDF file
  call close_nc(ncid, ierr, cmessage)
  if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 

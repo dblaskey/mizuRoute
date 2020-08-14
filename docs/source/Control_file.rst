@@ -1,10 +1,10 @@
 Control file
 ============
 
-Control file is a simple text file, mainly defining model control such as simulation time, file name and locations, routing option etc. 
+Control file is a simple text file, defining various model controls such as simulation time, file names and locations, routing options etc. 
 Variables in control file are read in the beginning of the code (see ``./build/src/read_control.f90``) and 
 saved in fortran variable specified by tag (inside <> in table) and as public variables (see ``./build/src/public_var.f90``) . 
-Some of such public varialbes have some default values, but most of them are not defined.
+Some of control varialbes have their default values, but most of them are not defined.
 Those undefined variables need to be defined in control file.   
 Other variables in supplement table have their default values but can be also included in control file to overwrite the values. 
 The order of variables in the control file does not matter. However, grouping variables into similar themes is recommended for readibility. 
@@ -19,6 +19,7 @@ Some of rules
 * Format: <tag>    variable    ! comments
 * tag is Fortran variable name and cannot be changed and have to be enclosed by <>
 * need ! after variable, otherwise getting error.
+* Do not leave any lines empty in control file
 
 
 The following variables (not pre-defined in the code) need to be defined in control file.
@@ -86,12 +87,6 @@ The following variables (not pre-defined in the code) need to be defined in cont
 +--------+------------------------+-------------------------------------------------------------------------------------------+
 |   2,3  | <dname_data_remap>     | dimension name for data                                                                   |
 +--------+------------------------+-------------------------------------------------------------------------------------------+
-| 1,2,3  | <restart_write>        | restart ouput timing options. N[n]ever, L[l]ast, S[s]pecified.                            | 
-+--------+------------------------+-------------------------------------------------------------------------------------------+
-| 1,2,3  | <restart_date>         | specified restart date in yyyy-mm-dd (hh:mm:ss) if <restart_write> = "Specified"          | 
-+--------+------------------------+-------------------------------------------------------------------------------------------+
-| 1,2,3  | <fname_state_in>       | input restart netCDF name. If not specified, simulation start with cold start             | 
-+--------+------------------------+-------------------------------------------------------------------------------------------+
 | 1,2,3  | <route_opt>            | option for routing schemes 0-> both, 1->IRF, 2->KWT, otherwise error                      |
 +--------+------------------------+-------------------------------------------------------------------------------------------+
 
@@ -120,6 +115,8 @@ Variables that have default values but can be overwritten
 +------------------------+------------------------+--------------------------------------------------------------------------+
 | <time_units>           | From runoff input      | specified time units <unit> since yyyy-mm-dd (hh:mm:ss). See note 4      |
 +------------------------+------------------------+--------------------------------------------------------------------------+
+| <netcdf_format>        | netcdf4                | netcdf format for output netcdf. other options: classic, 64bit_offset.   |
++------------------------+------------------------+--------------------------------------------------------------------------+
 
 1. River network subset mode. 
 
@@ -136,6 +133,69 @@ Variables that have default values but can be overwritten
 
 Often case, river network data has different variable names than defaults. In this case, variable names can be speficied in control file as well.
 See :doc:`River parameters <seg_hru_param>`.   
+
+
+Restart options 
+---------------------
+
+mizuRoute does not write restart netCDF as default. The following control variables are used to control restart dropoff timing and use restart file for continuous run from the previous simulations.
+The restart file is written at previous time step to the specified time. In other words, if ``Specified`` is used for <restart_write> and ``1981-01-01-00000`` is specified in <restart_date>, mizuRoute writes restart file
+at ``1980-12-31 00:00:00`` for daily time step. The restart file name uses the time stamp at user specified timing. ``Annual``, ``Monthly``, ``Daily`` options also follow This convention. 
+
+The restart file name convension:  <case_name>.r.yyyy-mm-dd-sssss.nc 
+
+
++---------------------+---------------------------------------------------------------------------------------------------------+
+| tag                 | Description                                                                                             |
++=====================+=========================================================================================================+
+| <restart_dir>       | directory for restart files. defualt is <output_dir>                                                    | 
++---------------------+---------------------------------------------------------------------------------------------------------+
+| <restart_write>     | restart ouput options. N[n]ever (default), L[l]ast, S[s]pecified, Annual, M[m]onthly, D[d]aily.         | 
++---------------------+---------------------------------------------------------------------------------------------------------+
+| <restart_date>      | restart time in yyyy-mm-dd (hh:mm:ss). required if <restart_write> = "Specified"                        | 
++---------------------+---------------------------------------------------------------------------------------------------------+
+| <restart_month>     | periodic restart month (default 1). Effective if <restart_write>="Annual"                               | 
++---------------------+---------------------------------------------------------------------------------------------------------+
+| <restart_day>       | periodic restart day (default 1). Effective if <restart_write>="Annual" or "Monthly"                    | 
++---------------------+---------------------------------------------------------------------------------------------------------+
+| <restart_hour>      | periodic restart hour (default 0). Effective if <restart_write>="Annual", "Monthly", or "Daily"         | 
++---------------------+---------------------------------------------------------------------------------------------------------+
+| <fname_state_in>    | input restart netCDF name. If not specified, simulation start with cold start                           | 
++---------------------+---------------------------------------------------------------------------------------------------------+
+
+
+Output variables
+---------------------
+
+The following variables, besides time, basinID (RN_hru ID) and reachID can be output in netCDF. Users can control which variables are output by setting <variable_name> to T or F in control file. All the variables are set to T by default.
+The output file name includes a timie stamp at the first time step.  
+
+The output file name convension:  <case_name>.h.yyyy-mm-dd-sssss.nc
+
+
++------------------------+------------------------------------------------------------------------------------------------+
+| output variables       | Descriptions                                                                                   |
++========================+================================================================================================+
+| <basRunoff>            | runoff depth at RN_hru, remapped from HM_hru. See note 1 and 2.                                |
++------------------------+------------------------------------------------------------------------------------------------+
+| <instRunoff>           | runoff volume [m3/s] at reach, converted by mulitplying basRunoff by RN_hru area . See note 2  |
++------------------------+------------------------------------------------------------------------------------------------+
+| <dlayRunoff>           | runoff volume [m3/s] at reach, after hillslope routing instRunoff. see Note 2                  |
++------------------------+------------------------------------------------------------------------------------------------+
+| <sumUpstreamRunoff>    | accumulated delayed runoff volume (dlyRunoff) over all upstream reaches.                       |
++------------------------+------------------------------------------------------------------------------------------------+
+| <KWTroutedRunoff>      | runoff volume [m3/s] after KWT reach routing dlayRunoff. See note 3                            |
++------------------------+------------------------------------------------------------------------------------------------+
+| <IRFroutedRunoff>      | runoff volume [m3/s] after IRF reach routing dlayRunoff. See note 3                            |
++------------------------+------------------------------------------------------------------------------------------------+
+
+1. The unit of runoff depth is the same as the unit used in runoff data
+
+
+2. If runoff depth from runoff data is already delayed by hill-slope routing outside mizuRoute, <doesBasinRoute> should be set to 0. In this case, runoff volume computed from basRunoff is populated in <dlayRunoff> and <instRunoff> is not output.  
+
+
+3. routed runoff corresponding to the scheme is not ouput if users deactivate a particular routing scheme with <route_opt> tag.  
 
 
 Control file examples

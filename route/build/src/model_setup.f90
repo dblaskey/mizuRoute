@@ -1,7 +1,7 @@
 MODULE model_setup
 
 ! data types
-USE nrtype,    ONLY : i4b,dp,lgt          ! variable types, etc.
+USE nrtype,    ONLY : i4b,i8b,dp,lgt          ! variable types, etc.
 USE nrtype,    ONLY : strLen              ! length of characters
 USE dataTypes, ONLY : var_ilength         ! integer type:          var(:)%dat
 USE dataTypes, ONLY : var_clength         ! integer type:          var(:)%dat
@@ -13,6 +13,8 @@ USE public_var, ONLY : verySmall
 USE public_var, ONLY : integerMissing
 USE public_var, ONLY : realMissing
 USE public_var, ONLY : charMissing
+
+USE io_netcdf, ONLY : close_nc         ! close netcdf
 
 USE nr_utility_module, ONLY : unique  ! get unique element array
 USE nr_utility_module, ONLY : indexx  ! get rank of data value
@@ -175,18 +177,27 @@ CONTAINS
   USE globalData, ONLY : roJulday      ! julian day: runoff input time
   USE globalData, ONLY : modJulday     ! julian day: at model time step
   USE globalData, ONLY : endJulday     ! julian day: at end of simulation
+  USE globalData, ONLY : simout_nc     ! netCDF meta data
 
    implicit none
-   ! output: error control
+   ! output
    logical(lgt),              intent(out)   :: finished
    integer(i4b),              intent(out)   :: ierr             ! error code
    character(*),              intent(out)   :: message          ! error message
+   ! local variables
+   character(len=strLen)                    :: cmessage         ! error message of downwind routine
 
    ! initialize error control
    ierr=0; message='update_time/'
 
    if (abs(modJulday-endJulday)<verySmall) then
      finished=.true.
+
+     if (simout_nc%status == 2) then
+       call close_nc(simout_nc%ncid, ierr, cmessage)
+       if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
+     end if
+
      write(iulog,'(a)') new_line('a'), '--------------------'
      write(iulog,'(a)')                'Finished simulation'
      write(iulog,'(a)')                '--------------------'
@@ -216,7 +227,7 @@ CONTAINS
   USE public_var,    ONLY : dt                ! simulation time step (seconds)
   USE public_var,    ONLY : routOpt           ! routing scheme options  0-> both, 1->IRF, 2->KWT, otherwise error
   USE public_var,    ONLY : fname_state_in    ! name of state input file
-  USE public_var,    ONLY : output_dir        ! directory containing output data
+  USE public_var,    ONLY : restart_dir       ! directory containing output data
   USE globalData,    ONLY : RCHFLX            ! reach flux structure
   USE globalData,    ONLY : TSEC              ! begining/ending of simulation time step [sec]
 
@@ -235,7 +246,7 @@ CONTAINS
   ! read restart file and initialize states
   if (trim(fname_state_in)/=charMissing) then
 
-   call read_state_nc(trim(output_dir)//trim(fname_state_in), routOpt, T0, T1, ierr, cmessage)
+   call read_state_nc(trim(restart_dir)//trim(fname_state_in), routOpt, T0, T1, ierr, cmessage)
    if(ierr/=0)then; message=trim(message)//trim(cmessage); return; endif
 
    TSEC(0)=T0; TSEC(1)=T1
@@ -263,7 +274,9 @@ CONTAINS
 
   ! subroutines:
   USE process_time_module, ONLY : process_time  ! process time information
-  USE process_time_module, ONLY : process_calday! compute data and time from julian day
+  USE process_time_module, ONLY : conv_julian2cal ! compute data and time from julian day
+  USE process_time_module, ONLY : conv_cal2julian ! compute data and time from julian day
+  USE time_utils_module,   ONLY : ndays_month     ! compute number of days in a month
   USE io_netcdf,           ONLY : get_nc        ! netcdf input
   ! derived datatype
   USE dataTypes,           ONLY : time          ! time data type
@@ -275,8 +288,13 @@ CONTAINS
   USE public_var,          ONLY : simStart      ! date string defining the start of the simulation
   USE public_var,          ONLY : simEnd        ! date string defining the end of the simulation
   USE public_var,          ONLY : calendar      ! calendar name
+  USE public_var,          ONLY : dt
+  USE public_var,          ONLY : secprday
   USE public_var,          ONLY : restart_write ! restart write option
   USE public_var,          ONLY : restart_date  ! restart date
+  USE public_var,          ONLY : restart_month !
+  USE public_var,          ONLY : restart_day   !
+  USE public_var,          ONLY : restart_hour  !
   ! saved time variables
   USE globalData,          ONLY : timeVar       ! time variables (unit given by runoff data)
   USE globalData,          ONLY : iTime         ! time index at runoff input time step
@@ -285,8 +303,9 @@ CONTAINS
   USE globalData,          ONLY : startJulday   ! julian day: start of routing simulation
   USE globalData,          ONLY : endJulday     ! julian day: end of routing simulation
   USE globalData,          ONLY : modJulday     ! julian day: at model time step
-  USE globalData,          ONLY : restartJulday ! julian day: at restart
   USE globalData,          ONLY : modTime       ! model time data (yyyy:mm:dd:hh:mm:sec)
+  USE globalData,          ONLY : restCal       ! restart time data (yyyy:mm:dd:hh:mm:sec)
+  USE globalData,          ONLY : dropCal       ! restart dropoff calendar date/time
 
   implicit none
 
@@ -299,7 +318,10 @@ CONTAINS
   integer(i4b)                             :: ix
   type(time)                               :: rofCal
   type(time)                               :: simCal
+  integer(i4b)                             :: nDays          ! number of days in a month
   real(dp)                                 :: convTime2Days
+  real(dp)                                 :: restartJulday
+  real(dp)                                 :: tempJulday
   character(len=7)                         :: t_unit
   character(len=strLen)                    :: cmessage         ! error message of downwind routine
   character(len=50)                        :: fmt1='(a,I4,a,I2.2,a,I2.2,x,I2.2,a,I2.2,a,F5.2)'
@@ -348,8 +370,8 @@ CONTAINS
 
   ! check sim_start is before the last time step in runoff data
   if(startJulday>roJulday(nTime)) then
-    call process_calday(roJulday(nTime), calendar, rofCal, ierr, cmessage)
-    call process_calday(startJulday, calendar, simCal, ierr, cmessage)
+    call conv_julian2cal(roJulday(nTime), calendar, rofCal, ierr, cmessage)
+    call conv_julian2cal(startJulday, calendar, simCal, ierr, cmessage)
     write(iulog,'(2a)') new_line('a'),'ERROR: <sim_start> is after the first time step in input runoff'
     write(iulog,fmt1)  ' runoff_end  : ', rofCal%iy,'-',rofCal%im,'-',rofCal%id, rofCal%ih,':', rofCal%imin,':',rofCal%dsec
     write(iulog,fmt1)  ' <sim_start> : ', simCal%iy,'-',simCal%im,'-',simCal%id, simCal%ih,':', simCal%imin,':',simCal%dsec
@@ -358,8 +380,8 @@ CONTAINS
 
   ! Compare sim_start vs. time at first time step in runoff data
   if (startJulday < roJulday(1)) then
-    call process_calday(roJulday(1), calendar, rofCal, ierr, cmessage)
-    call process_calday(startJulday, calendar, simCal, ierr, cmessage)
+    call conv_julian2cal(roJulday(1), calendar, rofCal, ierr, cmessage)
+    call conv_julian2cal(startJulday, calendar, simCal, ierr, cmessage)
     write(iulog,'(2a)') new_line('a'),'WARNING: <sim_start> is before the first time step in input runoff'
     write(iulog,fmt1)  ' runoff_start: ', rofCal%iy,'-',rofCal%im,'-',rofCal%id, rofCal%ih,':', rofCal%imin,':',rofCal%dsec
     write(iulog,fmt1)  ' <sim_start> : ', simCal%iy,'-',simCal%im,'-',simCal%id, simCal%ih,':', simCal%imin,':',simCal%dsec
@@ -369,8 +391,8 @@ CONTAINS
 
   ! Compare sim_end vs. time at last time step in runoff data
   if (endJulday > roJulday(nTime)) then
-    call process_calday(roJulday(nTime), calendar, rofCal, ierr, cmessage)
-    call process_calday(endJulday,       calendar, simCal, ierr, cmessage)
+    call conv_julian2cal(roJulday(nTime), calendar, rofCal, ierr, cmessage)
+    call conv_julian2cal(endJulday,       calendar, simCal, ierr, cmessage)
     write(iulog,'(2a)')  new_line('a'),'WARNING: <sim_end> is after the last time step in input runoff'
     write(iulog,fmt1)   ' runoff_end: ', rofCal%iy,'-',rofCal%im,'-',rofCal%id, rofCal%ih,':', rofCal%imin,':',rofCal%dsec
     write(iulog,fmt1)   ' <sim_end> : ', simCal%iy,'-',simCal%im,'-',simCal%id, simCal%ih,':', simCal%imin,':',simCal%dsec
@@ -389,21 +411,48 @@ CONTAINS
   ! initialize previous model time
   modTime(0) = time(integerMissing, integerMissing, integerMissing, integerMissing, integerMissing, realMissing)
 
-  ! restart drop off time
+ ! Set restart calendar date/time and dropoff calendar date/time and
+ ! -- For periodic restart options  ---------------------------------------------------------------------
+ ! Ensure that user-input restart month, day are valid.
+ ! "Annual" option:  if user input day exceed number of days given user input month, set to last day
+ ! "Monthly" option: use 2000-01 as template calendar yr/month
+ ! "Daily" option:   use 2000-01-01 as template calendar yr/month/day
+ select case(trim(restart_write))
+   case('Annual','annual')
+     call ndays_month(2000, restart_month, calendar, nDays, ierr, cmessage)
+     if(ierr/=0) then; message=trim(message)//trim(cmessage); return; endif
+     if (restart_day > nDays) restart_day=nDays
+   case('Monthly','monthly'); restart_month = 1
+   case('Daily','daily');     restart_month = 1; restart_day = 1
+ end select
+
   select case(trim(restart_write))
     case('last','Last')
-      call process_time(trim(simEnd), calendar, restartJulday, ierr, cmessage)
-      if(ierr/=0) then; message=trim(message)//trim(cmessage)//' [restartDate]'; return; endif
-    case('never','Never')
-      restartJulday = 0.0_dp
+      call conv_julian2cal(endJulday, calendar, dropCal, ierr, cmessage)
+      if(ierr/=0) then; message=trim(message)//trim(cmessage)//' [endJulday->dropCal]'; return; endif
+      restart_month = dropCal%im; restart_day = dropCal%id; restart_hour = dropCal%ih
     case('specified','Specified')
       if (trim(restart_date) == charMissing) then
         ierr=20; message=trim(message)//'<restart_date> must be provided when <restart_write> option is "specified"'; return
       end if
       call process_time(trim(restart_date),calendar, restartJulday, ierr, cmessage)
-      if(ierr/=0) then; message=trim(message)//trim(cmessage)//' [restartDate]'; return; endif
+      if(ierr/=0) then; message=trim(message)//trim(cmessage)//' [restart_date]'; return; endif
+      restartJulday = restartJulday - dt/secprday
+      call conv_julian2cal(restartJulday, calendar, dropCal, ierr, cmessage)
+      if(ierr/=0) then; message=trim(message)//trim(cmessage)//' [restartJulday->dropCal]'; return; endif
+      restart_month = dropCal%im; restart_day = dropCal%id; restart_hour = dropCal%ih
+    case('Annual','Monthly','Daily','annual','monthly','daily')
+      restCal = time(2000, restart_month, restart_day, restart_hour, 0, 0._dp)
+      call conv_cal2julian(restCal, calendar, tempJulday, ierr, cmessage)
+      if(ierr/=0)then; message=trim(message)//trim(cmessage)//' [restCal->tempJulday]'; return; endif
+      tempJulday = tempJulday - dt/secprday
+      call conv_julian2cal(tempJulday, calendar, dropCal, ierr, cmessage)
+      if(ierr/=0) then; message=trim(message)//trim(cmessage)//' [tempJulday->dropCal]'; return; endif
+      restart_month = dropCal%im; restart_day = dropCal%id; restart_hour = dropCal%ih
+    case('never','Never')
+      restCal = time(integerMissing, integerMissing, integerMissing, integerMissing, integerMissing, realMissing)
     case default
-      ierr=20; message=trim(message)//'Current accepted <restart_write> options: last[Last], never[Never], specified[Specified]'; return
+      ierr=20; message=trim(message)//'Current accepted <restart_write> options: L[l]ast, N[n]ever, S[s]pecified, A[a]nnual, M[m]onthly, D[d]aily'; return
   end select
 
  END SUBROUTINE init_time
@@ -605,7 +654,7 @@ CONTAINS
  integer(i4b), intent(out)          :: ierr             ! error code
  character(*), intent(out)          :: message          ! error message
  ! local variables
- integer(i4b), allocatable          :: unq_qhru_id(:)
+ integer(i8b), allocatable          :: unq_qhru_id(:)
  integer(i4b), allocatable          :: unq_idx(:)
  character(len=strLen)              :: cmessage         ! error message from subroutine
 
@@ -700,8 +749,8 @@ CONTAINS
 
  implicit none
  ! input
- integer(i4b), intent(in)  :: qid(:)                       ! ID of input vector
- integer(i4b), intent(in)  :: qidMaster(:)                 ! ID of master vector
+ integer(i8b), intent(in)  :: qid(:)                       ! ID of input vector
+ integer(i8b), intent(in)  :: qidMaster(:)                 ! ID of master vector
  ! output
  integer(i4b), intent(out) :: qix(:)                       ! index within master vector
  integer(i4b), intent(out) :: ierr                         ! error code
